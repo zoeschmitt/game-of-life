@@ -5,15 +5,19 @@ import (
 	"github.com/go-gl/gl/v4.1-core/gl"
 	"github.com/go-gl/glfw/v3.2/glfw"
 	"log"
+	"math/rand"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const (
-	width   = 500
-	height  = 500
-	rows    = 10
-	columns = 10
+	width     = 500
+	height    = 500
+	rows      = 100
+	columns   = 100
+	threshold = 0.15
+	fps       = 2
 	// These are strings containing GLSL source code for two shaders, one for a vertex shader and another for a fragment shader.
 	// The only thing special about these strings is that they both end in a null-termination character, \x00 - a requirement for
 	// OpenGL to be able to compile them. Make note of the fragmentShaderSource, this is where we define the color of our shape
@@ -61,6 +65,9 @@ type cell struct {
 	// A drawable is a square Vertex Array Object.
 	drawable uint32
 
+	alive     bool
+	aliveNext bool
+
 	x int
 	y int
 }
@@ -72,12 +79,23 @@ func main() {
 
 	window := initGlfw()
 	defer glfw.Terminate()
-
 	program := initOpenGL()
-	cells := makeCells()
 
+	cells := makeCells()
 	for !window.ShouldClose() {
+		t := time.Now()
+
+		for x := range cells {
+			for _, c := range cells[x] {
+				c.checkState(cells)
+			}
+		}
+
 		draw(cells, window, program)
+
+		// reduce the game speed by introducing a frames-per-second limitation in the main loop.
+		// 2 game iterations per second.
+		time.Sleep(time.Second/time.Duration(fps) - time.Since(t))
 	}
 }
 
@@ -203,10 +221,19 @@ func compileShader(source string, shaderType uint32) (uint32, error) {
 // Each cell in the slice is a new cell struct created using the newCell function.
 // Returns the 2D slice of cell pointers.
 func makeCells() [][]*cell {
+	// use the current time as the randomization seed, giving each game a unique starting state.
+	rand.Seed(time.Now().UnixNano())
+
 	cells := make([][]*cell, rows, rows)
 	for x := 0; x < rows; x++ {
 		for y := 0; y < columns; y++ {
 			c := newCell(x, y)
+
+			// set cells alive state equal to the result of a random float, between 0.0 and 1.0,
+			// being less than threshold (0.15). Each cell has a 15% chance of starting out alive.
+			c.alive = rand.Float64() < threshold
+			c.aliveNext = c.alive
+
 			cells[x] = append(cells[x], c)
 		}
 	}
@@ -263,6 +290,72 @@ func newCell(x, y int) *cell {
 
 // Each cell needs to know how to draw itself.
 func (c *cell) draw() {
+	if !c.alive {
+		return
+	}
+
 	gl.BindVertexArray(c.drawable)
 	gl.DrawArrays(gl.TRIANGLES, 0, int32(len(square)/3))
+}
+
+// checkState determines the state of the cell for the next tick of the game.
+func (c *cell) checkState(cells [][]*cell) {
+	c.alive = c.aliveNext
+	c.aliveNext = c.alive
+
+	liveCount := c.liveNeighbors(cells)
+	if c.alive {
+		// 1. Any live cell with fewer than two live neighbours dies, as if caused by underpopulation.
+		if liveCount < 2 {
+			c.aliveNext = false
+		}
+
+		// 2. Any live cell with two or three live neighbours lives on to the next generation.
+		if liveCount == 2 || liveCount == 3 {
+			c.aliveNext = true
+		}
+
+		// 3. Any live cell with more than three live neighbours dies, as if by overpopulation.
+		if liveCount > 3 {
+			c.aliveNext = false
+		}
+	} else {
+		// 4. Any dead cell with exactly three live neighbours becomes a live cell, as if by reproduction.
+		if liveCount == 3 {
+			c.aliveNext = true
+		}
+	}
+}
+
+// liveNeighbors returns the number of live neighbors for a cell.
+func (c *cell) liveNeighbors(cells [][]*cell) int {
+	var liveCount int
+	add := func(x, y int) {
+		// If we're at an edge, check the other side of the board.
+		if x == len(cells) {
+			x = 0
+		} else if x == -1 {
+			x = len(cells) - 1
+		}
+		if y == len(cells[x]) {
+			y = 0
+		} else if y == -1 {
+			y = len(cells[x]) - 1
+		}
+
+		if cells[x][y].alive {
+			liveCount++
+		}
+	}
+
+	add(c.x-1, c.y)   // To the left
+	add(c.x+1, c.y)   // To the right
+	add(c.x, c.y+1)   // up
+	add(c.x, c.y-1)   // down
+	add(c.x-1, c.y+1) // top-left
+	add(c.x+1, c.y+1) // top-right
+	add(c.x-1, c.y-1) // bottom-left
+	add(c.x+1, c.y-1) // bottom-right
+
+	return liveCount
 }
